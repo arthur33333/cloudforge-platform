@@ -1,114 +1,88 @@
 ---
-name: kdp-print-geometry
-description: Choose a KDP trim size, paper and margins, and compute spine width and full-wrap cover dimensions. Use when starting a book project, when deciding between trim sizes, when a page count changes and the cover has to follow, or whenever a spine, gutter, bleed or wrap dimension is being calculated or quoted. Biased toward KDP's US standard trim sizes.
+name: kdp-typeset-interior
+description: Typeset a book interior for KDP with Typst — page geometry, gutter-aware margins, the even-page-count problem, and the Typst behaviours that fail silently. Use when building or debugging an interior PDF, changing a book's layout or typography, or working out why a Typst book build produced the wrong extent, wrong margins or wrong glyphs.
 ---
 
-# KDP print geometry
-
-Every number here comes from `scripts/kdp_geometry.py`. Do not compute a spine
-width, a wrap dimension or a gutter minimum in your head or in a one-off snippet —
-call the module. A caliper written down in two places is a caliper that will
-eventually disagree with itself.
+# Typesetting the interior
 
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/kdp_geometry.py --list-trims
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/kdp_geometry.py --pages 398 --trim 6x9
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/kdp_geometry.py --pages 398 --json
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build-interior.py
 ```
 
-## Prefer a standard trim
+Finds the nearest `book.toml`, computes geometry from `[print]`, and compiles
+`templates/interior.typ` with every dimension passed in as `sys.inputs`. The
+template needs no editing when the trim or the extent moves.
 
-KDP splits paperback trims into **standard** and **non-standard**. Standard sizes
-are available in every marketplace, are the only ones some distribution channels
-accept, and are what the print-cost tables are quoted against. Non-standard sizes
-print, but expanded distribution may refuse them and the economics are worse.
+## Why this is not one `typst compile`
 
-So: recommend a standard size, and treat a non-standard one as a decision that
-has to be made deliberately rather than by typing a number slightly wrong. The
-module returns `standard: null` for a non-standard trim and every caller surfaces
-it — that is the warning working as intended, not a bug to route around.
+**The even page count cannot be decided inside Typst.** Printers require an even
+leaf count, and the extent is not known until the document is laid out. A
+conditional on `counter(page).final()` oscillates: adding the parity leaf makes
+the count even, which makes the condition false, which removes the leaf. The
+decision has to be made by something standing outside the document — so the build
+compiles, counts, and compiles again.
 
-The defaults worth reaching for first:
+**The gutter minimum is tiered by page count.** A book at 301 pages needs a wider
+inside margin than the same book at 299. So margins cannot be fixed in the
+template; the second pass derives them from the first pass's measured extent. A
+book sitting exactly on a tier boundary can need a third pass, and the script
+handles that.
 
-| Book | Trim |
-|---|---|
-| Non-fiction, guides, reference, technical | **6x9** |
-| Novels, memoir | 5.5x8.5 |
-| Novellas, poetry | 5x8 |
-| Workbooks, manuals, anything with figures | 7x10 |
-| Wide tables, code listings, textbooks | 8.5x11 |
+## Where the text lives
 
-Trims above 6.12in wide or 9in tall are "large trim" and cost more to print. Say
-so when recommending one.
+`[paths].body` in `book.toml`. A single `.typ` file or a directory of them.
 
-## Spine width
+**The plugin does not write the book.** It typesets a manuscript that already
+exists. If asked to draft, outline or expand the text, that is a different task —
+say so and do it as a normal request if the user wants it, but it is not part of
+this workflow and nothing here assumes AI-written text.
 
-Page count times per-page caliper. No minimum, no rounding.
+**The body is never hand-edited in the built PDF.** If an entry is wrong, fix the
+source. For a generated book — an index, a catalogue, a directory — fix the
+generator or its data, never the manuscript, because at that scale a hand-edit is
+silently destroyed on the next rebuild.
 
-| Paper | Caliper (in/page) |
-|---|---|
-| White B&W | 0.002252 |
-| Cream B&W | 0.0025 |
-| Standard colour | 0.002252 |
-| Premium colour | 0.002347 |
+`templates/interior.typ` is the exception and is hand-written on purpose: it is
+layout, not content. The build never rewrites it, so typography changes survive.
 
-The paper chosen in the KDP form must match the paper the cover was built for, or
-the spine KDP computes stops matching the spine that was printed.
+## Typst behaviours that fail silently
 
-KDP prints **no spine text at 79 pages or under**. Above that, keep type inside
-the band left after 0.0625in of clearance on each side — the press trims with
-variance toward either face, so type filling the full spine width runs onto a
-cover.
+**Missing glyphs produce no warning.** Typst falls back through the system font
+list, renders the character in whatever face it found, and exits 0. On a machine
+with a different font set, the same source produces a different book. Always pass
+`--font-path` at bundled fonts — `build-interior.py` does — and always run
+`/kdp-preflight`, whose round-trip check is the only signal that exists.
 
-## Full wrap
+**A literal `/*` opens a block comment and eats the rest of the file.** The build
+succeeds; the document is just short.
 
-```
-wrap width  = bleed + trim_w + spine + trim_w + bleed
-wrap height = bleed + trim_h + bleed
-```
+**`pagebreak()` is illegal inside a `columns()` container.** Use page-level
+columns if back matter has to start on a fresh page.
 
-Bleed is 0.125in, on all four outside edges of the wrap. The cover is **one page**
-carrying back, spine and front — not three pages, not three files. Back cover on
-the left, front on the right.
+**Changing `justify` part-way through an entry starts a new paragraph**, so the
+gap that follows is governed by paragraph `spacing`, not `leading`. Invisible at
+thumbnail size; check at 300 dpi.
 
-KDP's minimum safe zone is 0.25in from the trim line. The bundled template uses
-0.375in because type sitting exactly on the compliance figure reads on a proof as
-though it is about to fall off the page.
+**`binding: left` is what makes `inside`/`outside` margins alternate correctly**
+across a spread. Setting plain `left`/`right` margins instead puts the gutter on
+the wrong side of every verso page — legal, and wrong on half the book.
 
-## Margins and the gutter
+## Escaping
 
-The inside margin (gutter) minimum is **tiered by page count** — this is the one
-people get wrong, because it means a book that grows past a tier boundary needs
-its margins changed:
+Do not hand-roll escaping of Typst syntax characters in generated content. Emit
+the data as JSON and read it in the template with `json()`: values arrive as
+strings rather than markup, so `#`, `$`, `*`, `_`, `@` and backslashes render
+literally. Hand-rolled escaping across thousands of machine-generated strings is
+the likeliest source of silent corruption in a book nobody can proofread by eye.
 
-| Pages | Minimum gutter |
-|---|---|
-| up to 150 | 0.375in |
-| 151–300 | 0.500in |
-| 301–500 | 0.625in |
-| 501–700 | 0.750in |
-| 701–828 | 0.875in |
+The hazard survives only in the hand-written prose of the template itself.
 
-Outside margins: 0.25in minimum without bleed, 0.375in with. These are rejection
-thresholds, not designs — `recommended_margins()` adds a buffer over the floor,
-because a book set exactly at the minimum is accepted by KDP and still reads badly.
+## Fonts
 
-`build-interior.py` derives margins from the **measured** first-pass extent for
-exactly this reason.
+Bundle them under `[paths].fonts` and list the intended families in
+`[print].fonts`. Preflight lists what actually got embedded and flags anything
+outside that set, which is how a substitution gets caught before the proof copy
+rather than after it.
 
-## Bleed
-
-Bleed is for interiors where art runs to the page edge. With bleed the interior
-FILE is larger than the trim — 0.125in added to the top, bottom and outer edge,
-**never** the gutter edge, which is bound rather than trimmed.
-
-If nothing in the interior touches the edge, supply the file at trim size and
-select "No bleed". Choosing bleed for a text-only book tells KDP to trim 0.125in
-off content that is not there.
-
-## Verify before quoting
-
-`reference/` carries the source and the verification date for each table. KDP
-changes these figures without notice and without a changelog. If a number is
-about to go into a real upload and the date is old, say the date rather than
-presenting the figure as current.
+Libertinus ships with Typst, so the default template compiles on a machine with
+no fonts installed at all.
