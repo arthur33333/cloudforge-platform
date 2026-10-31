@@ -1,101 +1,86 @@
 ---
-name: kdp-cover-wrap
-description: Build or edit a KDP full-wrap paperback cover in Typst — spine derived from the interior's measured extent, fold lines, safe zones, spine-text rules, and the layout traps that only show up in a printed proof. Use when building a cover, changing a cover design, diagnosing a spine that does not match the book, or preparing cover art for upload.
+name: kdp-preflight
+description: Verify a built KDP book mechanically before upload — trim, page parity, gutter against the tiered minimum, font round-trip for silent glyph substitution, and the cover's spine against the interior's real extent. Use before any upload, after any rebuild, and when deciding whether a book is actually ready to print.
 ---
 
-# The full-wrap cover
-
-One page carrying back cover, spine and front cover, with bleed on all four
-outside edges. That single sheet is what KDP wants uploaded.
+# Pre-flight
 
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build-cover.py
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build-cover.py --pages 420   # what-if only
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/preflight.py
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/preflight.py --json
 ```
 
-## The rule the whole design hangs off
+Exits non-zero on failure. Everything it checks is something a machine can check;
+everything it cannot check, it names.
 
-**The cover is built last, and from the interior — never from a number.**
+## The principle
 
-Spine width is page count times caliper. A cover built before the interior was
-finished, or carried over from a previous edition, has a spine that does not match
-the book. At best the spine type sits off-centre; at worst the title wraps onto
-the front face.
+**Check the artifact, not the signal that stands in for it.**
 
-Nothing catches this on screen. Not a PDF viewer, not KDP's uploader. The proof
-copy catches it, three weeks and one print charge later.
+Every failure this script is built to catch produces a *successful-looking*
+build. Typst exits 0. The PDF opens. KDP accepts the upload. The problem is
+discovered in a proof copy, which is the most expensive possible place to
+discover it.
 
-So `build-cover.py` will not take a page count. It runs `pdfinfo` over the
-interior that was actually built. `--pages` exists only to answer "what would a
-different extent cost", and refuses to write the file.
+So: read the page geometry out of the PDF rather than trusting `book.toml`. Read
+the page count out of the PDF rather than trusting the last build. Derive the
+cover's spine from the finished wrap rather than recomputing what it should have
+been. A number that agrees with itself because it came from one place twice has
+not been verified.
 
-That is one of **two independent checks**. `kdp-package.py` then measures the
-finished wrap, subtracts both faces and both bleeds, and compares what is left
-against the spine this page count needs — the same fact reached from the opposite
-direction. A stale cover has to defeat both.
+## What each check is protecting against
 
-## Three layout rules that are not style preferences
+**Trim.** KDP will accept a file at the wrong trim and print the book with the
+wrong margins. Nobody sees it until the proof arrives.
 
-Each of these is a proof copy someone lost. They are repeated at the top of
-`templates/cover.typ`; read them before editing it.
+**Page parity.** An odd leaf count means the build is stale — the parity pass did
+not run or its output was overwritten.
 
-**1. Nothing on the front panel is anchored up from the bottom edge.**
+**Gutter against the tiered minimum.** KDP's minimum inside margin steps up with
+page count. A book that grew past a boundary since its margins were set has text
+being swallowed into the bind on every page, and it looks perfectly fine in a PDF
+viewer because the viewer does not bind anything.
 
-The whole panel is one fixed-height box with `v(1fr)` spacers in it, so leftover
-space is distributed rather than assumed. Anchoring a block to the foot makes its
-position a guess about how tall everything above it turned out — and that guess is
-wrong the moment the title or subtitle wraps to another line.
+**Font round-trip.** The important one, and the reason this script exists.
 
-With `1fr` the collision is not tuned away, it cannot happen: a longer subtitle
-squeezes the gaps instead of overprinting the byline.
+Typst does not warn when a character has no glyph in the requested font. It falls
+back through the system font list, renders the character in some other face, and
+exits 0. No error, no warning, nothing anyone would catch by eye across hundreds
+of pages. On another machine with different fonts installed, the same source
+produces a different book.
 
-**2. Neither bottom corner of the back panel carries type.**
+The check enumerates every codepoint in the source, confirms each one survives
+into the PDF via `pdftotext`, and lists the fonts actually embedded via
+`pdffonts`. A substitution reported here is not necessarily a failure — the
+fallback is why there is no tofu on the page — but it becomes *visible* and
+deliberate rather than discovered in print.
 
-KDP places the retailer barcode in one corner and other print channels use the
-other, so neither is safe whichever channel the wrap is built for. Put back-cover
-furniture at the head of the panel instead.
+**Cover spine against the interior's extent.** The second of the two independent
+routes to the same fact. `build-cover.py` measured the interior going in; this
+measures the wrap coming out.
 
-**3. A literal `/*` opens a Typst block comment and eats the rest of the file.**
+**Listing limits.** Description over 4,000 characters, more than 7 keywords, more
+than 3 categories, a quotation mark in a keyword — all rejected by the form, all
+cheaper to catch here.
 
-The document still compiles — just shorter. If a cover rebuild loses its back
-half for no apparent reason, this is why. Write any URL containing one as a
-string concatenation.
+## Reporting the result
 
-## Spine text
+If checks fail, **say which, and show the output.** Do not describe a build as
+ready when preflight returned non-zero.
 
-KDP prints no spine text at 79 pages or under; `build-cover.py` passes
-`spine_text=false` and the template omits it. Above that, cap type to the band
-left after 0.0625in clearance each side — the press trims with variance toward
-either face.
+If checks pass, **do not describe the book as ready to print.** The script says
+this itself; repeat it rather than dropping it:
 
-## Cover art
+- The gutter still has to be read in KDP's own previewer, page by page. It is the
+  only thing that shows what the press will do.
+- Any font substitution listed still has to be eyeballed in a proof.
+- The proof copy still has to be ordered and read.
 
-The wrap itself stays typeset. Folds, spine and safe zones are geometry, and an
-image stretched across the whole wrap loses them.
+Those are not gaps in the script. They are things no script can do, and a report
+that omits them is telling the user the book is finished when it is not.
 
-To use raster art — AI-generated or otherwise — place it inside the front panel:
+## Dates
 
-```typst
-#place(top + left, dx: front-x, dy: bleed)[
-  #image("../assets/art/front.png", width: trim-w + bleed, height: wrap-h)
-]
-```
-
-Supply it at **300 dpi at final size**. `kdp_geometry.py` prints the wrap and
-front-panel pixel dimensions at 300 dpi for exactly this.
-
-The plugin does not generate cover art and does not call an image API. Source or
-generate the image however you like, drop it in `assets/art/`, and place it.
-
-## Before upload
-
-- **Convert to CMYK.** KDP asks for CMYK covers and strips embedded profiles.
-  Convert a copy, never the source.
-- Confirm the print options selected in the KDP form match the file — a different
-  paper or trim there means a different spine.
-
-## When the geometry is wrong
-
-`build-cover.py` measures the rendered wrap and fails if it does not match the
-geometry it asked for. That failure means the template is overriding
-`page(width:)` itself. Fix the template rather than the check.
+`reference/` carries a verification date on every KDP figure. KDP changes them
+without notice and without a changelog. When a number is about to go into a real
+upload, quote the date alongside it rather than presenting it as current.
